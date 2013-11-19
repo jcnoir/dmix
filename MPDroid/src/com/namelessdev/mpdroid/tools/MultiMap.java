@@ -90,7 +90,9 @@ public class MultiMap<K, V> {
             valueList = new LinkedList<V>();
             mInternalMap.put(key, valueList);
         }
-        valueList.add(value);
+        if (!valueList.contains(value)) {
+            valueList.add(value);
+        }
         return value;
     }
 

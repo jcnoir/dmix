@@ -4,7 +4,7 @@ import android.graphics.Bitmap;
 import com.namelessdev.mpdroid.cover.ICoverRetriever;
 
 public class CoverInfo {
-    public enum STATE {NEW, CACHE_COVER_FETCH, WEB_COVER_FETCH, CREATE_BITMAP}
+    public enum STATE {NEW, CACHE_COVER_FETCH, WEB_COVER_FETCH, CREATE_BITMAP, PROCESS_WAITING_REQUESTS}
 
     ;
     private STATE state = STATE.NEW;
@@ -21,6 +21,7 @@ public class CoverInfo {
     private ICoverRetriever coverRetriever;
     private CoverDownloadListener listener;
     private boolean cacheOnly = false;
+    private boolean scrolling = false;
 
     public CoverInfo(CoverInfo coverInfo) {
         this.state = coverInfo.state;
@@ -35,9 +36,18 @@ public class CoverInfo {
         this.cachedCoverMaxSize = coverInfo.cachedCoverMaxSize;
         this.coverRetriever = coverInfo.coverRetriever;
         this.cacheOnly = coverInfo.cacheOnly;
+        this.scrolling = coverInfo.scrolling;
     }
 
     public CoverInfo() {
+    }
+
+    public boolean isScrolling() {
+        return scrolling;
+    }
+
+    public void setScrolling(boolean scrolling) {
+        this.scrolling = scrolling;
     }
 
     public boolean isCacheOnly() {
