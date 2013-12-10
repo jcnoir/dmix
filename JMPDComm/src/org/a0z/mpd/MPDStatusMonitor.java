@@ -6,17 +6,18 @@
  */
 package org.a0z.mpd;
 
-import java.util.LinkedList;
-import java.util.List;
-
+import android.util.Log;
 import org.a0z.mpd.event.StatusChangeListener;
 import org.a0z.mpd.event.TrackPositionListener;
 import org.a0z.mpd.exception.MPDConnectionException;
 import org.a0z.mpd.exception.MPDServerException;
 
+import java.util.LinkedList;
+import java.util.List;
+
 /**
  * Monitors MPD Server and sends events on status changes.
- * 
+ *
  * @version $Id: MPDStatusMonitor.java 2941 2005-02-09 02:34:21Z galmeida $
  */
 public class MPDStatusMonitor extends Thread {
@@ -29,7 +30,7 @@ public class MPDStatusMonitor extends Thread {
 
 	/**
 	 * Constructs a MPDStatusMonitor.
-	 * 
+	 *
 	 * @param mpd
 	 *           MPD server to monitor.
 	 * @param delay
@@ -37,13 +38,13 @@ public class MPDStatusMonitor extends Thread {
 	 */
 	public MPDStatusMonitor(MPD mpd, int delay) {
 		super("MPDStatusMonitor");
-		
+
 		this.mpd = mpd;
 		this.delay = delay;
 		this.giveup = false;
 		this.statusChangedListeners = new LinkedList<StatusChangeListener>();
 		this.trackPositionChangedListeners = new LinkedList<TrackPositionListener>();
-		
+
 		// integrate MPD stuff into listener lists
 		addStatusChangeListener(mpd.getPlaylist());
 	}
@@ -65,7 +66,7 @@ public class MPDStatusMonitor extends Thread {
 		boolean connectionLost = false;
 
 		while (!giveup) {
-			Boolean connectionState = Boolean.valueOf(mpd.isConnected());
+			Boolean connectionState = mpd.isConnected();
 			boolean connectionStateChanged = false;
 
 			if (connectionLost || oldConnectionState != connectionState) {
@@ -86,7 +87,10 @@ public class MPDStatusMonitor extends Thread {
 					if (connectionStateChanged) {
 						dbChanged=statusChanged=true;
 					} else {
-						List<String> changes = mpd.waitForChanges();
+                        List<String> changes = null;
+                        if (mpd.isIdleConnected() && mpd.isConnected()) {
+                            changes = mpd.waitForChanges();
+                        }
 
 						if (null==changes || changes.isEmpty()) {
 							continue;
@@ -173,7 +177,8 @@ public class MPDStatusMonitor extends Thread {
 						}
 					}
 				} catch (MPDConnectionException e) {
-					// connection lost
+                    Log.e(MPDStatusMonitor.class.getSimpleName(), "Connection lost : " +e);
+                    // connection lost
 					connectionState = Boolean.FALSE;
 					connectionLost = true;
 				} catch (MPDServerException e) {
@@ -194,7 +199,7 @@ public class MPDStatusMonitor extends Thread {
 
 	/**
 	 * Adds a <code>StatusChangeListener</code>.
-	 * 
+	 *
 	 * @param listener
 	 *           a <code>StatusChangeListener</code>.
 	 */
@@ -204,7 +209,7 @@ public class MPDStatusMonitor extends Thread {
 
 	/**
 	 * Adds a <code>TrackPositionListener</code>.
-	 * 
+	 *
 	 * @param listener
 	 *           a <code>TrackPositionListener</code>.
 	 */

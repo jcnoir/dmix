@@ -15,6 +15,9 @@ import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
 
+import static android.util.Log.e;
+import static android.util.Log.w;
+
 /**
  * Class representing a connection to MPD Server.
  *
@@ -23,6 +26,8 @@ import java.util.List;
 public class MPDConnection {
     private static final boolean DEBUG = false;
     private static final int CONNECTION_TIMEOUT = 10000;
+    private static final int MAX_CONNECT_RETRY = 5;
+    private static final int MAX_REQUEST_RETRY = 5;
 
     private static final String MPD_RESPONSE_ERR = "ACK";
     private static final String MPD_RESPONSE_OK = "OK";
@@ -42,32 +47,85 @@ public class MPDConnection {
     private List<MPDCommand> commandQueue;
     private int readWriteTimeout;
 
+    private boolean connected;
+    //Store password to re-send it when re-connecting
+    private String password = null;
+    private static int INSTANCE_COUNTER = 0;
+    private int instance = INSTANCE_COUNTER++;
+    private String connectionName = "Unknown";
 
-    MPDConnection(InetAddress server, int port) throws MPDServerException{
+
+    MPDConnection(InetAddress server, int port) throws MPDServerException {
         this(server, port, 0);
+        this.connectionName = "Data";
     }
-    MPDConnection(InetAddress server, int port, int readWriteTimeout) throws MPDServerException {
-        this.readWriteTimeout = readWriteTimeout;
-        hostPort = port;
-        hostAddress = server;
-        commandQueue = new ArrayList<MPDCommand>();
 
-        // connect right away and setup streams
-        try {
-            mpdVersion = this.connect();
+    private void connectWithRetry() throws MPDServerException {
+        connectWithRetry(hostAddress, hostPort, readWriteTimeout);
+    }
 
-            // Use UTF-8 when needed
-            if (mpdVersion[0] > 0 || mpdVersion[1] >= 10) {
-                outputStream = new OutputStreamWriter(sock.getOutputStream(), "UTF-8");
-                inputStream = new InputStreamReader(sock.getInputStream(), "UTF-8");
-            } else {
-                outputStream = new OutputStreamWriter(sock.getOutputStream());
-                inputStream = new InputStreamReader(sock.getInputStream());
-            }
-        } catch(IOException e) {
-            disconnect();
-            throw new MPDServerException(e.getMessage(), e);
+    private synchronized void connectWithRetry(InetAddress server, int port, int readWriteTimeout) throws MPDServerException {
+
+        boolean success = false;
+        int retryCount = 0;
+        Exception lastException = null;
+
+        if (isSockConnected()) {
+          Log.d(MPDConnection.class.getSimpleName(), "No need to reconnect : " + connectionName + " : " + instance);
+        return;
         }
+        //connected = false;
+
+        while (!success && retryCount < MAX_CONNECT_RETRY) {
+
+            try {
+                this.readWriteTimeout = readWriteTimeout;
+                hostPort = port;
+                hostAddress = server;
+                commandQueue = new ArrayList<MPDCommand>();
+
+                // connect right away and setup streams
+                try {
+                    mpdVersion = this.connect();
+
+                    // Use UTF-8 when needed
+                    if (mpdVersion[0] > 0 || mpdVersion[1] >= 10) {
+                        outputStream = new OutputStreamWriter(sock.getOutputStream(), "UTF-8");
+                        inputStream = new InputStreamReader(sock.getInputStream(), "UTF-8");
+                    } else {
+                        outputStream = new OutputStreamWriter(sock.getOutputStream());
+                        inputStream = new InputStreamReader(sock.getInputStream());
+                    }
+                    if (password != null) {
+                        password(password);
+                    }
+                } catch (IOException e) {
+                    disconnect();
+                    throw new MPDServerException(e.getMessage(), e);
+                }
+                success = true;
+            } catch (Exception e) {
+                lastException = e;
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e1) {
+                    //Nothing to do
+                }
+            }
+            retryCount++;
+        }
+        connected = success;
+        if (!success) {
+            e(MPD.class.getSimpleName(), "Cannot restore mpd connection : " + connectionName + " : " + instance + " after " + retryCount + " attempts : " + lastException.getMessage());
+            throw new MPDServerException(lastException.getLocalizedMessage());
+        } else {
+            w(MPD.class.getSimpleName(), "Mpd connection restored : " + connectionName + " : " + instance + " after " + retryCount + " attempts");
+        }
+    }
+
+    MPDConnection(InetAddress server, int port, int readWriteTimeout) throws MPDServerException {
+        this.connectionName = "Idle";
+        connectWithRetry(server, port, readWriteTimeout);
     }
 
     final synchronized private int[] connect() throws MPDServerException {
@@ -78,7 +136,7 @@ public class MPDConnection {
                 //ok, don't care about any exception here
             }
         }
-        try{
+        try {
             sock = new Socket();
             sock.setSoTimeout(readWriteTimeout);
             sock.connect(new InetSocketAddress(hostAddress, hostPort), CONNECTION_TIMEOUT);
@@ -100,23 +158,27 @@ public class MPDConnection {
             } else {
                 throw new MPDServerException("Bogus response from server");
             }
-        }catch(IOException e){
+        } catch (IOException e) {
             disconnect();
             throw new MPDConnectionException(e);
         }
     }
 
     synchronized void disconnect() throws MPDServerException {
-        if(isConnected())
+        if (isSockConnected())
             try {
                 sock.close();
                 sock = null;
-            } catch(IOException e) {
+            } catch (IOException e) {
                 throw new MPDConnectionException(e.getMessage(), e);
             }
     }
 
     boolean isConnected() {
+        return connected;
+    }
+
+    boolean isSockConnected() {
         return (sock != null && sock.isConnected() && !sock.isClosed());
     }
 
@@ -141,6 +203,11 @@ public class MPDConnection {
         return sendCommand(new MPDCommand(command, args));
     }
 
+    synchronized void password(String password) throws MPDServerException {
+        this.password = password;
+        sendCommand(new MPDCommand(MPDCommand.MPD_CMD_PASSWORD, password));
+    }
+
     synchronized void queueCommand(String command, String... args) {
         queueCommand(new MPDCommand(command, args));
     }
@@ -149,32 +216,33 @@ public class MPDConnection {
         commandQueue.add(command);
     }
 
-    static synchronized List< String[] > separatedQueueResults(List<String> lines) {
-        List< String[] > result = new ArrayList< String[] >();
+    static synchronized List<String[]> separatedQueueResults(List<String> lines) {
+        List<String[]> result = new ArrayList<String[]>();
         ArrayList<String> lineCache = new ArrayList<String>();
 
         for (String line : lines) {
             if (line.equals(MPD_CMD_BULK_SEP)) { // new part
                 if (lineCache.size() != 0) {
-                    result.add((String[])lineCache.toArray(new String[0]));
+                    result.add((String[]) lineCache.toArray(new String[0]));
                     lineCache.clear();
                 }
             } else
                 lineCache.add(line);
         }
         if (lineCache.size() != 0) {
-            result.add((String[])lineCache.toArray(new String[0]));
+            result.add((String[]) lineCache.toArray(new String[0]));
         }
         return result;
     }
 
-    synchronized List< String[] > sendCommandQueueSeparated() throws MPDServerException {
+    synchronized List<String[]> sendCommandQueueSeparated() throws MPDServerException {
         return separatedQueueResults(sendCommandQueue(true));
     }
 
     synchronized List<String> sendCommandQueue() throws MPDServerException {
         return sendCommandQueue(false);
     }
+
     synchronized List<String> sendCommandQueue(boolean withSeparator) throws MPDServerException {
         String commandstr = (withSeparator ? MPD_CMD_START_BULK_OK : MPD_CMD_START_BULK) + "\n";
         for (MPDCommand command : commandQueue) {
@@ -195,110 +263,186 @@ public class MPDConnection {
     }
 
 
-
     List<String> sendAsyncCommand(MPDCommand command)
-        throws MPDServerException {
-	return syncedWriteAsyncRead(command.toString());
+            throws MPDServerException {
+        return syncedWriteAsyncRead(command.toString());
     }
 
     List<String> sendAsyncCommand(String command, String... args)
-        throws MPDServerException {
-	return sendAsyncCommand(new MPDCommand(command, args));
+            throws MPDServerException {
+        return sendAsyncCommand(new MPDCommand(command, args));
     }
 
     private synchronized void writeToServer(String command) throws IOException {
-	outputStream.write(command);
-	outputStream.flush();
+        outputStream.write(command);
+        outputStream.flush();
     }
 
     private synchronized ArrayList<String> readFromServer() throws MPDServerException,
-                                                                   SocketTimeoutException, IOException {
-	ArrayList<String> result = new ArrayList<String>();
-	BufferedReader in = new BufferedReader(inputStream, 1024);
+            SocketTimeoutException, IOException {
+        ArrayList<String> result = new ArrayList<String>();
+        BufferedReader in = new BufferedReader(inputStream, 1024);
 
 
-	boolean dataReaded = false;
-	for (String line = in.readLine(); line != null; line = in.readLine()) {
-	    dataReaded = true;
-	    if (line.startsWith(MPD_RESPONSE_OK))
-		break;
-	    if (line.startsWith(MPD_RESPONSE_ERR))
-		throw new MPDServerException("Server error: "
-                                             + line.substring(MPD_RESPONSE_ERR.length()));
-	    result.add(line);
-	}
-	if(!dataReaded){
-	    // Close socket if there is no response... Something is wrong
-	    // (e.g.
-	    // MPD shutdown..)
-	    disconnect();
-	    throw new MPDConnectionException("Connection lost");
-	}
-	return result;
+        boolean dataReaded = false;
+        for (String line = in.readLine(); line != null; line = in.readLine()) {
+            dataReaded = true;
+            if (line.startsWith(MPD_RESPONSE_OK))
+                break;
+            if (line.startsWith(MPD_RESPONSE_ERR))
+                throw new MPDServerException("Server error: "
+                        + line.substring(MPD_RESPONSE_ERR.length()));
+            result.add(line);
+        }
+        if (!dataReaded) {
+            // Close socket if there is no response... Something is wrong
+            // (e.g.
+            // MPD shutdown..)
+            disconnect();
+            throw new MPDConnectionException("Connection lost");
+        }
+        return result;
     }
 
     private synchronized List<String> syncedWriteRead(String command)
-        throws MPDServerException {
-	ArrayList<String> result = new ArrayList<String>();
-	if (!isConnected())
-	    throw new MPDConnectionException("No connection to server");
+            throws MPDServerException {
 
-	// send command
-	try {
-	    writeToServer(command);
-	} catch (IOException e1) {
-	    disconnect();
-	    throw new MPDConnectionException(e1);
-	}
-	try {
-	    result = readFromServer();
-	    return result;
-	} catch (MPDConnectionException e) {
-	    if (command.startsWith(MPDCommand.MPD_CMD_CLOSE))
-		return result;// we sent close command, so don't care about Exception while ryong to read response
-	    else
-		throw e;
-	} catch (IOException e) {
-	    disconnect();
-	    throw new MPDConnectionException(e);
-	}
+        int retryCount = 0;
+        boolean success = false;
+        ArrayList<String> result = new ArrayList<String>();
+        Exception lastException = null;
+
+        while (!success && retryCount < MAX_REQUEST_RETRY) {
+            try {
+                if (!isConnected())
+                    throw new MPDConnectionException("No connection to server");
+
+                // send command
+                try {
+                    writeToServer(command);
+                } catch (IOException e1) {
+                    throw new MPDConnectionException(e1);
+                }
+                try {
+                    result = readFromServer();
+                    success = true;
+                } catch (MPDConnectionException e) {
+                    if (command.startsWith(MPDCommand.MPD_CMD_CLOSE))
+                        return result;// we sent close command, so don't care about Exception while ryong to read response
+                    else
+                        throw e;
+                } catch (IOException e) {
+                    throw new MPDConnectionException(e);
+                }
+            } catch (Exception ex1) {
+                lastException = ex1;
+                // Restore connection except if it already was the last attempt
+                if (retryCount < MAX_REQUEST_RETRY - 1) {
+                    try {
+                        connectWithRetry();
+                    } catch (MPDServerException e) {
+                        w(MPDConnection.class.getSimpleName(), "Cannot restore connection for syncedWriteRead, giving up retries : " + e);
+                        break;
+                    }
+
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException e1) {
+                        //Nothing to do
+                    }
+                }
+            }
+            retryCount++;
+        }
+        if (success) {
+            if (retryCount > 1) {
+                w(MPDConnection.class.getSimpleName(), "syncedWriteRead success after " + retryCount + " attempts");
+            }
+            return result;
+        } else {
+            e(MPDConnection.class.getSimpleName(), "syncedWriteRead failure on attempt " + retryCount + "with connection " + getConnectionID() + " -> " + lastException);
+            throw new MPDConnectionException(lastException);
+        }
     }
 
     private final Object lock = new Object();
+
     private List<String> syncedWriteAsyncRead(String command)
-        throws MPDServerException {
-	ArrayList<String> result = new ArrayList<String>();
-	//As we aren't in a synchronized method, concurencies issues may arrive,
-	//as sending 2 idle commands without haven't readed any data in which case MPD will close
-	//the connection.
-	//We use an object lock to avoid this
-	synchronized (lock) {
-	    try {
-		writeToServer(command);// synchronized method, Lock this instance
-	    } catch (IOException e) {
-		disconnect();
-		throw new MPDConnectionException(e);
-	    }
-	    boolean dataReaded = false;
-	    while (!dataReaded) {
-		try {
-		    result = readFromServer();// synchronized method, Lock this instance
-		    dataReaded = true;
-		} catch (SocketTimeoutException e) {
-		    // The lock on this instance is released on this instance when timeout occurs
-		    try {
-			Thread.sleep(500);
-		    } catch (InterruptedException e1) {
-			throw new MPDConnectionException(e1);
-		    }
-		} catch (IOException e) {
-		    disconnect();
-		    throw new MPDConnectionException(e);
-		}
-	    }
-	}
-	return result;
+            throws MPDServerException {
+
+        int retryCount = 0;
+        boolean success = false;
+        ArrayList<String> result = new ArrayList<String>();
+        Exception lastException = null;
+
+        while (!success && retryCount < MAX_REQUEST_RETRY) {
+            try {
+
+                if (!isSockConnected()) {
+                  connectWithRetry();
+                }
+
+                //As we aren't in a synchronized method, concurencies issues may arrive,
+                //as sending 2 idle commands without haven't readed any data in which case MPD will close
+                //the connection.
+                //We use an object lock to avoid this
+                synchronized (lock) {
+                    try {
+                        writeToServer(command);// synchronized method, Lock this instance
+                    } catch (IOException e) {
+                        throw new MPDConnectionException(e);
+                    }
+                    boolean dataReaded = false;
+                    while (!dataReaded) {
+                        try {
+                            result = readFromServer();// synchronized method, Lock this instance
+                            dataReaded = true;
+                        } catch (SocketTimeoutException e) {
+                            // The lock on this instance is released on this instance when timeout occurs
+                            try {
+                                Thread.sleep(500);
+                            } catch (InterruptedException e1) {
+                                throw new MPDConnectionException(e1);
+                            }
+                        } catch (IOException e) {
+                            throw new MPDConnectionException(e);
+                        }
+                    }
+                }
+                success = true;
+
+            } catch (Exception ex1) {
+                lastException = ex1;
+                ex1.printStackTrace();
+                // Restore connection except if it already was the last attempt
+                if (retryCount < MAX_REQUEST_RETRY - 1) {
+                    try {
+                        connectWithRetry();
+                    } catch (MPDServerException e) {
+                        w(MPDConnection.class.getSimpleName(), "Cannot restore connection for sendAsyncCommand, giving up retries : " + e);
+                        break;
+                    }
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException e1) {
+                        //Nothing to do
+                    }
+                }
+            }
+            retryCount++;
+        }
+        if (success) {
+            if (retryCount > 1) {
+                w(MPDConnection.class.getSimpleName(), "syncedWriteAsyncRead success after " + retryCount + " attempts");
+            }
+            return result;
+        } else {
+            e(MPDConnection.class.getSimpleName(), "syncedWriteAsyncRead failure on attempt " + retryCount + "with connection " + getConnectionID() + " -> " + lastException);
+            throw new MPDConnectionException(lastException);
+        }
     }
 
-
+    private String getConnectionID() {
+        return connectionName + instance;
+    }
 }
